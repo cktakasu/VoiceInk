@@ -1,0 +1,44 @@
+name: Build VoiceInk (make local)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout upstream VoiceInk (latest main)
+        uses: actions/checkout@v4
+        with:
+          repository: Beingpax/VoiceInk
+          ref: main
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          git --version
+
+      - name: Build with make local
+        run: make local
+
+      - name: Read built app version
+        id: ver
+        run: |
+          APP="$HOME/Downloads/VoiceInk.app"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist" || true
+          ls -la "$HOME/Downloads"
+
+      - name: Zip app bundle
+        run: |
+          cd "$HOME/Downloads"
+          ditto -c -k --sequesterRsrc --keepParent VoiceInk.app "$GITHUB_WORKSPACE/VoiceInk-app.zip"
+          ls -la "$GITHUB_WORKSPACE/VoiceInk-app.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceInk-app
+          path: VoiceInk-app.zip
+          retention-days: 7
