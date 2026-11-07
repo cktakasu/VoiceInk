@@ -3,6 +3,14 @@ name: Build VoiceInk (make local)
 on:
   workflow_dispatch:
 
+env:
+  # Stable self-signed code-signing identity (SHA-1 fingerprint of the
+  # "VoiceInk Local Signing (cktakasu)" certificate). Signing every build
+  # with the same certificate keeps the designated requirement constant,
+  # so macOS privacy permissions (Accessibility etc.) survive rebuilds.
+  # The certificate itself is stored in the VOICEINK_SIGNING_P12 secret.
+  SIGNING_IDENTITY: "1EFC11D5947B4846FF5E7FF0875318BE352ABCC3"
+
 jobs:
   build:
     runs-on: macos-latest
@@ -19,8 +27,42 @@ jobs:
           swift --version
           git --version
 
-      - name: Build with make local
-        run: make local
+      - name: Import stable signing certificate
+        env:
+          SIGNING_P12: ${{ secrets.VOICEINK_SIGNING_P12 }}
+          SIGNING_PASSWORD: ${{ secrets.VOICEINK_SIGNING_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/voiceink-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/voiceink-signing.p12"
+          security import "$RUNNER_TEMP/voiceink-signing.p12" -P "$SIGNING_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          rm -f "$RUNNER_TEMP/voiceink-signing.p12"
+          security find-identity -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Build with make local (stable signing)
+        run: make local LOCAL_CODESIGN_IDENTITY="$SIGNING_IDENTITY"
+
+      - name: Verify stable signature
+        run: |
+          APP="$HOME/Downloads/VoiceInk.app"
+          codesign -dvvv "$APP" 2>&1 | grep -E "^(Identifier|Authority|TeamIdentifier|Signature)" || true
+          DR="$(codesign -d -r- "$APP" 2>&1)"
+          echo "$DR"
+          if echo "$DR" | grep -q "cdhash"; then
+            echo "::error::App is ad-hoc signed (designated requirement is a cdhash); permissions would break on the next rebuild."
+            exit 1
+          fi
+          if ! echo "$DR" | grep -q "certificate"; then
+            echo "::error::Designated requirement is not certificate-based; signing identity did not stick."
+            exit 1
+          fi
+          codesign --verify --deep --strict "$APP"
+          echo "Stable certificate-based signature confirmed."
 
       - name: Read built app version
         id: ver
